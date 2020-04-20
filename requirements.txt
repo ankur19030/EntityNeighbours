@@ -1,0 +1,6 @@
+qwikidata
+lmdb
+sparqlwrapper
+pickle
+zlib
+six
