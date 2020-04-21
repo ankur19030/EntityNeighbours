@@ -31,6 +31,23 @@ chunk_dict= pickle.load(chunk_file)
 chunk_file.close()
 
 
+# Remove the keys which has alreadt been processed from the dict
+# Returns the length of the new dict
+
+def preprocess_chunk_dict(out_file):
+
+    global chunk_dict
+    new_list = []
+
+    entityNeighboursDB = EntityNeighboursDB(out_file)
+    for key in chunk_dict:
+        if not entityNeighboursDB.check_key(key):
+            new_list.append(key)            
+    chunk_dict = new_list
+    return len(new_list)
+
+
+
 import sys
 from SPARQLWrapper import SPARQLWrapper, JSON
 
@@ -99,11 +116,10 @@ def chunks(lst, n):
 
 
 def process_all_entities(out_file, pool_size, chunk_size,
-          init_map_size=1000000000000, buffer_size=3000):
+          init_map_size=1000000000000, buffer_size=3000,entity_batch_size=1):
   
-    all_results = []
-    dump_reader = chunks(chunk_dict,1)
-    total_lines = 850000
+    total_lines = preprocess_chunk_dict(out_file)/entity_batch_size
+    dump_reader = chunks(chunk_dict,entity_batch_size)
 
     with closing(lmdb.open(out_file, subdir=False, map_async=True, map_size=init_map_size,
                            max_dbs=3)) as env:
@@ -128,29 +144,44 @@ def process_all_entities(out_file, pool_size, chunk_size,
 
                 write_db(db, data)    
 
-        with closing(Pool(pool_size)) as pool:
-            entity_buf = [] # Writing into the buffer first, to have multiple transaction written to the database simultaneously.
-            f = partial(process_multiple_entities)
+        entity_buf = [] # Writing into the buffer first, to have multiple transaction written to the database simultaneously.
 
-            with tqdm(total=total_lines, mininterval=0.5) as bar:
-                for entities in pool.imap_unordered(f, dump_reader, chunksize=chunk_size):
+        with tqdm(total=total_lines, mininterval=0.5) as bar:
+            
+            for entities in dump_reader:
+                
+                results = process_multiple_entities(entities)
 
-                    for entity in  entities:
-                            entity_buf.append(entity)
+                for result in  results:
+                    entity_buf.append(result)
 
-                    if len(entity_buf) >= buffer_size:
-                        write_db(entity_db, entity_buf)
-                        entity_buf = []
-
-                    bar.update(1)
-
-                if entity_buf:
+                if len(entity_buf) >= buffer_size:
                     write_db(entity_db, entity_buf)
+                    entity_buf = []
 
-    result_file = open(out_file,"wb")
-    pickle.dump(all_results,result_file)
-    result_file.close()
+                bar.update(1)
 
+            if entity_buf:
+                write_db(entity_db, entity_buf)
+
+    
+class EntityNeighboursDB:
+
+    def __init__(self,db_file):
+
+        self._env = lmdb.open(db_file, readonly=True, subdir=False, lock=False, max_dbs=3)
+        self._entity_db = self._env.open_db(b'__entity_neighbours__')
+
+
+
+    def check_key(self,key):
+
+        with self._env.begin(db=self._entity_db) as txn:
+            value = txn.get(key.encode('utf-8'))
+            if not value:
+                return False
+            else:
+                return True
 
 
 process_all_entities("ENTITY_NEIGHBOURS_DB"+str(sys.argv[1]),mp.cpu_count(),1)
